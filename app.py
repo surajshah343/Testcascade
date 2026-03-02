@@ -4,8 +4,8 @@ import numpy as np
 
 st.set_page_config(page_title="Global Fleet Cascading Auditor", layout="wide")
 
-def run_optimized_cascade(df_fleet, df_contracts):
-    # 1. Setup
+def run_optimized_cascade_with_health(df_fleet, df_contracts):
+    # --- 1. Setup & Data Cleaning ---
     df_fleet.columns = df_fleet.columns.str.strip()
     df_contracts.columns = df_contracts.columns.str.strip()
     
@@ -23,15 +23,16 @@ def run_optimized_cascade(df_fleet, df_contracts):
     current_fleet['Current Age'] = pd.to_numeric(current_fleet['Current Age'], errors='coerce').fillna(0)
     
     vin_audit_trail = []
+    health_snapshots = []
 
     for year in range(start_year, max_end_year + 1):
         if year > start_year:
             current_fleet['Current Age'] += 1
             
         for t in ['A', 'C', 'VAN']:
-            # --- Phase 1: Identify Needs and Potential Movers ---
+            # --- Phase 2: Identify Needs and Potential Movers ---
             needs = []
-            surplus_pool = [] # Units that are either extra OR over-age for their current home
+            surplus_pool = [] 
             
             for loc in df_contracts['Location'].unique():
                 c_row = df_contracts[df_contracts['Location'] == loc].iloc[0]
@@ -40,80 +41,99 @@ def run_optimized_cascade(df_fleet, df_contracts):
                 target_qty = int(c_row[req_col]) if is_active else 0
                 max_age_loc = c_row[f'Max age type {t}']
                 
-                # Current units at this specific location
                 loc_units = current_fleet[(current_fleet['Location'] == loc) & (current_fleet['Type'] == t)]
                 
-                # Identify units that MUST leave this location (too old for HERE)
+                # Split units into "Fits Here" vs "Must Leave"
                 too_old_here = loc_units[loc_units['Current Age'] > max_age_loc]
                 fit_here = loc_units[loc_units['Current Age'] <= max_age_loc]
                 
-                # Anyone too old for this location goes to surplus pool immediately
                 for _, row in too_old_here.iterrows():
                     surplus_pool.append({'vin': row['VIN'], 'age': row['Current Age'], 'orig_loc': loc})
                 
-                # If we have more 'fit' units than needed, move extra young ones to surplus
                 if len(fit_here) > target_qty:
                     extras = fit_here.sort_values('Current Age', ascending=True).head(len(fit_here) - target_qty)
                     for _, row in extras.iterrows():
                         surplus_pool.append({'vin': row['VIN'], 'age': row['Current Age'], 'orig_loc': loc})
+                    # Temporarily drop them from current fleet so they can be re-homed
+                    current_fleet = current_fleet[~current_fleet['VIN'].isin(extras['VIN'])]
                 
-                # If we have fewer 'fit' units than needed, we have a deficit
+                # Units actually too old for this location must be removed from current_fleet to be re-homed
+                current_fleet = current_fleet[~current_fleet['VIN'].isin(too_old_here['VIN'])]
+
                 if len(fit_here) < target_qty:
                     needs.append({'loc': loc, 'needed': target_qty - len(fit_here), 'max_age': max_age_loc})
 
-            # --- Phase 2: Execute Moves (The Cascade) ---
+            # --- Phase 3: Execute Moves (The Cascade) ---
             for need in needs:
                 loc_to = need['loc']
                 age_limit_to = need['max_age']
                 
                 for _ in range(need['needed']):
-                    # Check if anyone in surplus pool fits the age requirement of this new location
                     eligible_surplus = [u for u in surplus_pool if u['age'] <= age_limit_to]
                     
                     if eligible_surplus:
-                        # Pick the best unit (youngest available that fits)
                         chosen = min(eligible_surplus, key=lambda x: x['age'])
                         surplus_pool.remove(chosen)
                         
-                        current_fleet.loc[current_fleet['VIN'] == chosen['vin'], 'Location'] = loc_to
+                        # Re-add to fleet with new location
+                        new_unit_data = df_fleet[df_fleet['VIN'] == chosen['vin']].copy()
+                        new_unit_data['Location'] = loc_to
+                        new_unit_data['Current Age'] = chosen['age']
+                        current_fleet = pd.concat([current_fleet, new_unit_data])
+                        
                         vin_audit_trail.append({
                             "Year": year, "VIN": chosen['vin'], "Type": t,
                             "Action": "CASCADED", "From": chosen['orig_loc'], "To": loc_to, 
-                            "Reason": f"Utilized surplus (Age {chosen['age']} fits limit {age_limit_to})"
+                            "Reason": f"Re-homed (Age {chosen['age']} fits limit {age_limit_to})"
                         })
                     else:
-                        # No one fits? New Lease.
                         new_vin = f"LSE-{year}-{t}-{np.random.randint(1000,9999)}"
-                        new_row = pd.DataFrame([{
-                            'VIN': new_vin, 'Model Year': year, 'Current Age': 0, 'Type': t, 'Location': loc_to
-                        }])
+                        new_row = pd.DataFrame([{'VIN': new_vin, 'Model Year': year, 'Current Age': 0, 'Type': t, 'Location': loc_to}])
                         current_fleet = pd.concat([current_fleet, new_row], ignore_index=True)
-                        vin_audit_trail.append({
-                            "Year": year, "VIN": new_vin, "Type": t,
-                            "Action": "NEW LEASE", "From": "FACTORY", "To": loc_to, "Reason": "No eligible surplus"
-                        })
+                        vin_audit_trail.append({"Year": year, "VIN": new_vin, "Type": t, "Action": "NEW LEASE", "From": "FACTORY", "To": loc_to, "Reason": "No eligible surplus"})
 
-            # --- Phase 3: Final Retirement ---
-            # Any units left in surplus pool that weren't picked up and are over their global max age
+            # Any remaining in pool too old for ANYWHERE are retired
             for s in surplus_pool:
                 if s['age'] > global_max_ages[t]:
-                    current_fleet = current_fleet[current_fleet['VIN'] != s['vin']]
-                    vin_audit_trail.append({
-                        "Year": year, "VIN": s['vin'], "Type": t,
-                        "Action": "RETIRED", "From": s['orig_loc'], "To": "SCRAP", "Reason": "Exceeded all contract limits"
-                    })
+                    vin_audit_trail.append({"Year": year, "VIN": s['vin'], "Type": t, "Action": "RETIRED", "From": s['orig_loc'], "To": "SCRAP", "Reason": "Exceeded all possible limits"})
 
-    return pd.DataFrame(vin_audit_trail)
+        # --- Phase 4: Take Health Snapshot ---
+        for loc in df_contracts['Location'].unique():
+            loc_stats = current_fleet[current_fleet['Location'] == loc]
+            avg_age = loc_stats['Current Age'].mean() if not loc_stats.empty else 0
+            count = len(loc_stats)
+            health_snapshots.append({'Year': year, 'Location': loc, 'Avg Age': round(avg_age, 1), 'Unit Count': count})
 
-# Streamlit UI (Standard Load)
-st.title("🚌 Intelligent Fleet Cascading System")
-uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
+    return pd.DataFrame(vin_audit_trail), pd.DataFrame(health_snapshots)
+
+# --- UI INTERFACE ---
+st.title("🚌 Fleet Waterfall & Cascading Auditor")
+
+uploaded_file = st.file_uploader("Upload Excel with 'Contracts' and 'Fleet File' tabs", type=["xlsx"])
 
 if uploaded_file:
     df_c = pd.read_excel(uploaded_file, sheet_name="Contracts")
     df_f = pd.read_excel(uploaded_file, sheet_name="Fleet File")
     
-    if st.button("Run Optimized Audit"):
-        audit_trail = run_optimized_cascade(df_f, df_c)
-        st.write("### VIN Movement Audit")
+    if st.button("Generate Detailed Analysis"):
+        audit_trail, health_df = run_optimized_cascade_with_health(df_f, df_c)
+        
+        # 1. VIN Detailed Audit
+        st.header("📍 Detailed VIN Movement Log")
         st.dataframe(audit_trail, use_container_width=True)
+
+        # 2. Location Health Matrix (Age by Year and Location)
+        st.header("📊 Fleet Maturity Matrix (Avg Age by Location)")
+        st.write("This table shows the progression of average age at each location after cascades.")
+        
+        age_pivot = health_df.pivot(index='Location', columns='Year', values='Avg Age')
+        st.table(age_pivot)
+
+        # 3. Count Matrix (Units by Year and Location)
+        st.header("🔢 Unit Count Matrix")
+        count_pivot = health_df.pivot(index='Location', columns='Year', values='Unit Count')
+        st.table(count_pivot)
+
+        # Download
+        csv = audit_trail.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Full Audit CSV", data=csv, file_name="fleet_audit_report.csv")
