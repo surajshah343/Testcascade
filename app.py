@@ -11,9 +11,11 @@ def run_fleet_engine(df_fleet, df_contracts):
     df_contracts.columns = df_contracts.columns.str.strip()
     
     start_year = 2024
+    # Automatically determine forecast length from the furthest contract end date
     max_end_year = int(df_contracts['End Year'].max())
     types = ['A', 'C', 'VAN']
     
+    # Global Max Age across all locations to prevent infinite loops
     global_max_ages = {
         'A': df_contracts['Max age type A'].max(),
         'C': df_contracts['Max age type C'].max(),
@@ -43,9 +45,11 @@ def run_fleet_engine(df_fleet, df_contracts):
                 
                 loc_units = current_fleet[(current_fleet['Location'] == loc) & (current_fleet['Type'] == t)]
                 
+                # Split units into "Fits Here" vs "Must Leave"
                 too_old_here = loc_units[loc_units['Current Age'] > max_age_loc]
                 valid_units = loc_units[loc_units['Current Age'] <= max_age_loc]
                 
+                # Surplus handling
                 for _, row in too_old_here.iterrows():
                     surplus_pool.append({'VIN': row['VIN'], 'Age': row['Current Age'], 'From': loc})
                 
@@ -60,6 +64,7 @@ def run_fleet_engine(df_fleet, df_contracts):
                 if len(valid_units) < target_qty:
                     needs.append({'loc': loc, 'needed': target_qty - len(valid_units), 'max_age': max_age_loc})
 
+            # Cascading & Leasing
             for need in needs:
                 loc_to = need['loc']
                 age_limit_to = need['max_age']
@@ -97,6 +102,7 @@ def run_fleet_engine(df_fleet, df_contracts):
                         "From": s['From'], "To": "SCRAP", "Age": s['Age']
                     })
 
+        # Year-End Snapshot
         for loc in df_contracts['Location'].unique():
             for t in types:
                 loc_fleet = current_fleet[(current_fleet['Location'] == loc) & (current_fleet['Type'] == t)]
@@ -113,8 +119,8 @@ def run_fleet_engine(df_fleet, df_contracts):
 
     return pd.DataFrame(audit_log), pd.DataFrame(yearly_stats)
 
-# --- STREAMLIT UI ---
-st.title("🚛 Fleet Cascading & Waterfall Dashboard")
+# --- UI ---
+st.title("🚌 Fleet Waterfall & Type-Specific Need Analysis")
 
 uploaded_file = st.file_uploader("Upload Fleet & Contract Data (XLSX)", type=["xlsx"])
 
@@ -126,24 +132,34 @@ if uploaded_file:
         if st.button("Generate Detailed Breakdown"):
             audit_df, stats_df = run_fleet_engine(df_f, df_c)
             
-            st.header("📈 Executive Waterfall Summary")
-            col1, col2 = st.columns(2)
+            st.header("📈 New Lease Needs (By Type)")
+            st.markdown("This section breaks down exactly how many new leases are needed per year, separated by vehicle category.")
             
-            with col1:
-                st.subheader("New Leases Needed (Yearly)")
-                lease_pivot = stats_df.pivot_table(index='Location', columns='Year', values='Units Needed (Lease)', aggfunc='sum')
-                st.dataframe(lease_pivot, use_container_width=True) # REMOVED .style to avoid matplotlib error
-                
-            with col2:
-                st.subheader("Average Fleet Age")
-                age_pivot = stats_df.pivot_table(index='Location', columns='Year', values='Avg Age', aggfunc='mean')
-                st.dataframe(age_pivot, use_container_width=True) # REMOVED .style to avoid matplotlib error
+            # Use Tabs for different types to keep the UI clean
+            type_tabs = st.tabs(["Type A Needs", "Type C Needs", "Van Needs"])
+            
+            for i, t_name in enumerate(["A", "C", "VAN"]):
+                with type_tabs[i]:
+                    st.subheader(f"New Lease Waterfall: Type {t_name}")
+                    type_df = stats_df[stats_df['Type'] == t_name]
+                    lease_pivot = type_df.pivot_table(index='Location', columns='Year', values='Units Needed (Lease)', aggfunc='sum')
+                    st.dataframe(lease_pivot, use_container_width=True)
+            
+            st.divider()
 
+            # --- CASCADING LOG ---
             st.header("🔄 Deployment & Movement Log")
-            move_only = audit_df[audit_df['Action'] != 'RETIRED']
-            st.dataframe(move_only[['Year', 'Action', 'VIN', 'Type', 'From', 'To', 'Age']], use_container_width=True)
+            st.markdown("Tracking VINs that were moved (Cascaded) instead of leased.")
+            move_only = audit_df[audit_df['Action'] == 'CASCADE (MOVED)']
+            st.dataframe(move_only[['Year', 'VIN', 'Type', 'From', 'To', 'Age']], use_container_width=True)
 
-            st.header("📍 Location Specific Deep-Dive")
+            # --- MATURITY MATRIX ---
+            st.header("📊 Average Fleet Age by Location")
+            age_pivot = stats_df.pivot_table(index='Location', columns='Year', values='Avg Age', aggfunc='mean')
+            st.dataframe(age_pivot, use_container_width=True)
+
+            # --- LOCATION DEEP DIVE ---
+            st.header("📍 Location Specific View")
             locations = df_c['Location'].unique()
             loc_tabs = st.tabs(list(locations))
             
@@ -152,9 +168,9 @@ if uploaded_file:
                     loc_summary = stats_df[stats_df['Location'] == loc].drop(columns=['Location'])
                     st.table(loc_summary.set_index(['Year', 'Type']))
                     
-                    st.markdown("**Specific VIN Actions at this Location:**")
+                    st.markdown("**Action Log for this Location:**")
                     loc_audit = audit_df[(audit_df['To'] == loc) | (audit_df['From'] == loc)]
                     st.dataframe(loc_audit.drop(columns=['Type']), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"Error: {e}")
