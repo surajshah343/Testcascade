@@ -3,151 +3,181 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="Fleet Lifecycle Auditor", layout="wide")
+st.set_page_config(page_title="Fleet Cascading Dashboard", layout="wide")
 
-def run_fleet_engine(df_fleet, df_contracts):
-    # --- Data Cleaning ---
-    df_fleet.columns = df_fleet.columns.str.strip()
-    df_contracts.columns = df_contracts.columns.str.strip()
+def run_fleet_engine(df_f, df_c):
+    # --- 1. Clean Data ---
+    df_f.columns = df_f.columns.str.strip()
+    df_c.columns = df_c.columns.str.strip()
     
-    start_year = 2024
-    max_end_year = int(df_contracts['End Year'].max())
     types = ['A', 'C', 'VAN']
+    start_year = 2024
+    max_end_year = int(df_c['End Year'].max())
     
+    # Absolute max age across the company for retirement
     global_max_ages = {
-        'A': df_contracts['Max age type A'].max(),
-        'C': df_contracts['Max age type C'].max(),
-        'VAN': df_contracts['Max age type VAN'].max()
+        'A': df_c['Max age type A'].max(),
+        'C': df_c['Max age type C'].max(),
+        'VAN': df_c['Max age type VAN'].max()
     }
     
-    current_fleet = df_fleet.copy()
+    current_fleet = df_f.copy()
     current_fleet['Current Age'] = pd.to_numeric(current_fleet['Current Age'], errors='coerce').fillna(0)
     
     audit_log = []
     yearly_stats = []
 
+    # --- 2. Simulation Loop ---
     for year in range(start_year, max_end_year + 1):
         if year > start_year:
             current_fleet['Current Age'] += 1
             
         for t in types:
-            needs = []
-            surplus_pool = []
+            # Get current fleet of this type
+            type_t_fleet = current_fleet[current_fleet['Type'] == t].copy()
             
-            for loc in df_contracts['Location'].unique():
-                c_row = df_contracts[df_contracts['Location'] == loc].iloc[0]
-                is_active = (year <= c_row['End Year'])
+            # Identify current requirements and age limits for this year
+            reqs = {}
+            age_limits = {}
+            for _, row in df_c.iterrows():
+                loc = row['Location']
+                is_active = (year <= row['End Year'])
                 req_col = f'Vehicle Count {t}' if t != 'VAN' else 'Vehicle Count Van'
-                target_qty = int(c_row[req_col]) if is_active else 0
-                max_age_loc = c_row[f'Max age type {t}']
-                
-                loc_units = current_fleet[(current_fleet['Location'] == loc) & (current_fleet['Type'] == t)]
-                valid_units = loc_units[loc_units['Current Age'] <= max_age_loc]
-                expired_units = loc_units[loc_units['Current Age'] > max_age_loc]
-                
-                # Capture Expired units for potential cascade elsewhere
-                for _, row in expired_units.iterrows():
-                    surplus_pool.append({'VIN': row['VIN'], 'Age': row['Current Age'], 'From': loc, 'Status': 'Expired locally'})
-                current_fleet = current_fleet[~current_fleet['VIN'].isin(expired_units['VIN'])]
-                
-                # Capture Spares (Extra units beyond requirement)
-                if len(valid_units) > target_qty:
-                    num_spares = len(valid_units) - target_qty
-                    spares = valid_units.sort_values('Current Age', ascending=True).head(num_spares)
-                    for _, row in spares.iterrows():
-                        surplus_pool.append({'VIN': row['VIN'], 'Age': row['Current Age'], 'From': loc, 'Status': 'Spare'})
-                    current_fleet = current_fleet[~current_fleet['VIN'].isin(spares['VIN'])]
-                
-                if len(valid_units) < target_qty:
-                    needs.append({'loc': loc, 'needed': target_qty - len(valid_units), 'max_age': max_age_loc})
+                reqs[loc] = int(row[req_col]) if is_active else 0
+                age_limits[loc] = row[f'Max age type {t}']
 
-            # Re-homing logic
-            for need in needs:
-                for _ in range(need['needed']):
-                    eligible = [u for u in surplus_pool if u['Age'] <= need['max_age']]
-                    if eligible:
-                        chosen = min(eligible, key=lambda x: x['Age'])
-                        surplus_pool.remove(chosen)
-                        
-                        unit_data = df_fleet[df_fleet['VIN'] == chosen['VIN']].iloc[0:1].copy()
-                        unit_data['Location'] = need['loc']
-                        unit_data['Current Age'] = chosen['Age']
-                        current_fleet = pd.concat([current_fleet, unit_data])
-                        
+            # Rebuilding the fleet assignments for this year
+            new_assignments = []
+            
+            # Step A: Identify valid units vs. surplus
+            # Pool = units that are too old for their current loc or are extra
+            pool = []
+            for loc, target in reqs.items():
+                loc_units = type_t_fleet[type_t_fleet['Location'] == loc]
+                limit = age_limits[loc]
+                
+                # Keep valid units up to the target count
+                valid = loc_units[loc_units['Current Age'] <= limit].sort_values('Current Age', ascending=False)
+                
+                # If we have more valid units than needed, the youngest are spares (to be moved/cascaded)
+                if len(valid) > target:
+                    keep = valid.head(target)
+                    spares = valid.tail(len(valid) - target)
+                    new_assignments.append(keep)
+                    pool.append(spares)
+                else:
+                    new_assignments.append(valid)
+                
+                # Any unit too old for its current location goes to the pool
+                too_old = loc_units[loc_units['Current Age'] > limit]
+                pool.append(too_old)
+
+            # Flatten lists
+            assigned_df = pd.concat(new_assignments) if new_assignments else pd.DataFrame()
+            pool_df = pd.concat(pool) if pool else pd.DataFrame()
+
+            # Step B: Fill Needs (Cascading)
+            for loc, target in reqs.items():
+                current_count = len(assigned_df[assigned_df['Location'] == loc]) if not assigned_df.empty else 0
+                needed = target - current_count
+                
+                if needed > 0 and not pool_df.empty:
+                    limit = age_limits[loc]
+                    # Eligible units from the global pool for this location
+                    eligible = pool_df[pool_df['Current Age'] <= limit].sort_values('Current Age')
+                    
+                    if not eligible.empty:
+                        to_move = eligible.head(needed).copy()
+                        for idx, row in to_move.iterrows():
+                            old_loc = row['Location']
+                            row['Location'] = loc
+                            assigned_df = pd.concat([assigned_df, pd.DataFrame([row])])
+                            pool_df = pool_df.drop(idx)
+                            
+                            audit_log.append({
+                                "Year": year, "VIN": row['VIN'], "Type": t,
+                                "Action": "CASCADE (MOVED)", "From": old_loc, "To": loc, "Age": row['Current Age']
+                            })
+                
+                # Step C: If still needed, New Lease
+                current_count = len(assigned_df[assigned_df['Location'] == loc]) if not assigned_df.empty else 0
+                final_needed = target - current_count
+                for _ in range(final_needed):
+                    new_vin = f"LSE-{year}-{t}-{np.random.randint(100,999)}"
+                    new_unit = pd.DataFrame([{
+                        'VIN': new_vin, 'Model Year': year, 'Current Age': 0, 'Type': t, 'Location': loc
+                    }])
+                    assigned_df = pd.concat([assigned_df, new_unit])
+                    audit_log.append({
+                        "Year": year, "VIN": new_vin, "Type": t,
+                        "Action": "NEW LEASE", "From": "FACTORY", "To": loc, "Age": 0
+                    })
+
+            # Step D: Retirement / Unassigned
+            if not pool_df.empty:
+                for idx, row in pool_df.iterrows():
+                    if row['Current Age'] > global_max_ages[t]:
                         audit_log.append({
-                            "Year": year, "VIN": chosen['VIN'], "Type": t, "Action": "CASCADED",
-                            "From": chosen['From'], "To": need['loc'], "Age": chosen['Age'], "Note": f"Re-homed as {chosen['Status']}"
+                            "Year": year, "VIN": row['VIN'], "Type": t,
+                            "Action": "RETIRED", "From": row['Location'], "To": "SCRAP", "Age": row['Current Age']
                         })
                     else:
-                        new_vin = f"LSE-{year}-{t}-{np.random.randint(100,999)}"
-                        new_row = pd.DataFrame([{'VIN': new_vin, 'Model Year': year, 'Current Age': 0, 'Type': t, 'Location': need['loc']}])
-                        current_fleet = pd.concat([current_fleet, new_row], ignore_index=True)
-                        audit_log.append({"Year": year, "VIN": new_vin, "Type": t, "Action": "NEW LEASE", "From": "FACTORY", "To": need['loc'], "Age": 0, "Note": "Gap fill"})
+                        # Unit is not needed anywhere but not old enough to scrap
+                        # Mark it as "Unassigned/Storage"
+                        row['Location'] = "STORAGE / UNASSIGNED"
+                        assigned_df = pd.concat([assigned_df, pd.DataFrame([row])])
 
-            # Scrapping
-            for s in surplus_pool:
-                if s['Age'] > global_max_ages[t]:
-                    audit_log.append({"Year": year, "VIN": s['VIN'], "Type": t, "Action": "RETIRED", "From": s['From'], "To": "SCRAP", "Age": s['Age'], "Note": "Over global limit"})
+            # Update master fleet for next year
+            current_fleet = pd.concat([current_fleet[current_fleet['Type'] != t], assigned_df])
 
-        # Record Snapshots
-        for loc in df_contracts['Location'].unique():
+        # Yearly Statistics
+        for loc in df_c['Location'].unique():
             for t in types:
                 loc_fleet = current_fleet[(current_fleet['Location'] == loc) & (current_fleet['Type'] == t)]
+                new_leases = len([a for a in audit_log if a['Year'] == year and a['To'] == loc and a['Action'] == "NEW LEASE" and a['Type'] == t])
                 yearly_stats.append({
                     'Year': year, 'Location': loc, 'Type': t,
-                    'Leases': len([a for a in audit_log if a['Year'] == year and a['To'] == loc and a['Action'] == "NEW LEASE" and a['Type'] == t]),
-                    'Count': len(loc_fleet), 'AvgAge': round(loc_fleet['Current Age'].mean(), 1) if not loc_fleet.empty else 0
+                    'Leases Needed': new_leases,
+                    'Units Count': len(loc_fleet),
+                    'Avg Age': round(loc_fleet['Current Age'].mean(), 1) if not loc_fleet.empty else 0
                 })
 
     return pd.DataFrame(audit_log), pd.DataFrame(yearly_stats)
 
 # --- UI ---
-st.title("🚌 Fleet Lifecycle & Movement Auditor")
+st.title("🚌 Intelligent Fleet Deployment & Waterfall")
 
-uploaded_file = st.file_uploader("Upload Fleet & Contract Data", type=["xlsx"])
+file = st.file_uploader("Upload Excel Template", type=["xlsx"])
 
-if uploaded_file:
-    df_c = pd.read_excel(uploaded_file, sheet_name="Contracts", engine='openpyxl')
-    df_f = pd.read_excel(uploaded_file, sheet_name="Fleet File", engine='openpyxl')
-    
-    if st.button("Run Full Simulation"):
-        # Store results in session state so they persist for the search box
-        st.session_state.audit_trail, st.session_state.stats = run_fleet_engine(df_f, df_c)
-        st.success("Simulation Complete!")
-
-# Only show outputs if simulation has been run
-if 'audit_trail' in st.session_state:
-    st.header("📊 Annual Lease Waterfall")
-    tabs = st.tabs(["Type A", "Type C", "VAN"])
-    for i, t in enumerate(["A", "C", "VAN"]):
-        with tabs[i]:
-            t_df = st.session_state.stats[st.session_state.stats['Type'] == t]
-            st.dataframe(t_df.pivot_table(index='Location', columns='Year', values='Leases', aggfunc='sum'), use_container_width=True)
-
-    # --- THE NEW SEARCH BOX ---
-    st.divider()
-    st.header("🔍 Unit-Level History Search")
-    st.markdown("Enter a **VIN** below to see exactly what happened to that specific vehicle across all years.")
-    
-    search_vin = st.text_input("Enter VIN Number:", placeholder="Example: V123456 or LSE-2025-A-123")
-    
-    if search_vin:
-        # Search for exact matches or partial strings
-        unit_history = st.session_state.audit_trail[st.session_state.audit_trail['VIN'].str.contains(search_vin, case=False, na=False)]
+if file:
+    try:
+        df_c = pd.read_excel(file, sheet_name="Contracts")
+        df_f = pd.read_excel(file, sheet_name="Fleet File")
         
-        if not unit_history.empty:
-            st.subheader(f"History for VIN: {search_vin}")
-            # Display history in a clean chronological list
-            for _, row in unit_history.sort_values('Year').iterrows():
-                with st.expander(f"Year {row['Year']}: {row['Action']}"):
-                    st.write(f"**From:** {row['From']} ➡️ **To:** {row['To']}")
-                    st.write(f"**Age at time of action:** {row['Age']}")
-                    st.write(f"**Notes:** {row['Note']}")
-            
-            st.dataframe(unit_history, use_container_width=True)
-        else:
-            st.warning("No movement history found for that VIN. It may have stayed at its original location for the entire period.")
+        if st.button("Run Full Cascading Simulation"):
+            audit, stats = run_fleet_engine(df_f, df_c)
+            st.session_state['audit'] = audit
+            st.session_state['stats'] = stats
+            st.success("Simulation Complete!")
 
-    # Show Average Age Matrix
-    st.header("📈 Maturity Matrix (Avg Age)")
-    st.dataframe(st.session_state.stats.pivot_table(index='Location', columns='Year', values='AvgAge', aggfunc='mean'), use_container_width=True)
+if 'audit' in st.session_state:
+    st.header("📈 New Lease Waterfall (The Need)")
+    t1, t2, t3 = st.tabs(["Type A", "Type C", "VAN"])
+    for i, name in enumerate(['A', 'C', 'VAN']):
+        with [t1, t2, t3][i]:
+            df = st.session_state.stats[st.session_state.stats['Type'] == name]
+            st.dataframe(df.pivot_table(index='Location', columns='Year', values='Leases Needed', aggfunc='sum'))
+
+    st.header("🔄 Deployment Movement Log")
+    st.markdown("Units moved from one location to another based on age availability.")
+    cascades = st.session_state.audit[st.session_state.audit['Action'] == "CASCADE (MOVED)"]
+    st.dataframe(cascades)
+
+    st.header("🔍 VIN Lifetime Search")
+    vin_id = st.text_input("Enter VIN to track its movement history:")
+    if vin_id:
+        history = st.session_state.audit[st.session_state.audit['VIN'].str.contains(vin_id, case=False)]
+        st.dataframe(history)
+
+    st.header("📊 Average Age (Fleet Health)")
+    st.dataframe(st.session_state.stats.pivot_table(index='Location', columns='Year', values='Avg Age', aggfunc='mean'))
