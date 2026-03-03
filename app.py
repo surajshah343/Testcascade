@@ -1,153 +1,145 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Fleet Cascade Optimizer", layout="wide")
+st.set_page_config(page_title="Fleet Optimizer", layout="wide")
 
-## --- UI Header ---
-st.title("🚌 Multi-Type Fleet Lifecycle Optimizer")
-st.markdown("Automated leasing and liquidation simulation based on location-specific age constraints.")
+st.title("🚛 Fleet Management & Leasing Optimizer")
 
-uploaded_file = st.file_uploader("Upload Excel Fleet Data (Tab A: Reqs, Tab B: Inv)", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel Fleet Data", type=["xlsx"])
 
 if uploaded_file:
     try:
-        # Load Raw Data
-        df_a = pd.read_excel(uploaded_file, sheet_name=0)
-        df_b = pd.read_excel(uploaded_file, sheet_name=1)
+        # Load exactly as specified
+        df_a = pd.read_excel(uploaded_file, sheet_name=0) # Tab A
+        df_b = pd.read_excel(uploaded_file, sheet_name=1) # Tab B
 
-        ## --- Pre-processing Tab A (The Wide-to-Long Melt) ---
-        # We need to transform Type A, Type C, and Van columns into a unified 'Type' column
-        # Logic: Identify Max Age columns and Count columns
+        # 1. Transform Tab A from Wide to Long (Unpivot)
+        # Mapping the exact column names provided
+        mapping = [
+            {'Type': 'A', 'MaxAge': 'Max age type A', 'Target': 'Vehicle Count A'},
+            {'Type': 'C', 'MaxAge': 'Max age type C', 'Target': 'Vehicle Count C'},
+            {'Type': 'VAN', 'MaxAge': 'Max age type VAN', 'Target': 'Vehicle Count Van'}
+        ]
         
-        age_cols = {
-            'A': 'Max age type A',
-            'C': 'Max age type C',
-            'VAN': 'Max age type VAN'
-        }
-        count_cols = {
-            'A': 'Vehicle Count A',
-            'C': 'Vehicle Count C',
-            'VAN': 'Vehicle Count Van'
-        }
-
-        # Create a cleaned Requirements table
         req_list = []
-        for vehicle_type in ['A', 'C', 'VAN']:
-            temp_df = df_a[['Location', 'End Year', age_cols[vehicle_type], count_cols[vehicle_type]]].copy()
-            temp_df['Type'] = vehicle_type
-            temp_df.columns = ['Location', 'EndYear', 'MaxAge', 'Target', 'Type']
-            req_list.append(temp_df)
+        for item in mapping:
+            temp = df_a[['Location', 'End Year', item['MaxAge'], item['Target']]].copy()
+            temp['Type'] = item['Type']
+            temp = temp.rename(columns={item['MaxAge']: 'MaxAge', item['Target']: 'Target', 'End Year': 'EndYear'})
+            req_list.append(temp)
         
-        reqs_cleaned = pd.concat(req_list, ignore_index=True)
+        reqs_long = pd.concat(req_list, ignore_index=True)
 
-        ## --- Simulation Engine ---
-        sim_years = st.sidebar.slider("Simulation Horizon (Years)", 1, 15, 10)
+        # 2. Simulation Parameters
+        sim_years = st.sidebar.slider("Simulation Years", 5, 10, 7)
         
-        if st.sidebar.button("Run Fleet Simulation"):
-            # Initial Inventory State
-            # Columns: VINs, Year, Current Age, Type, Location
-            inv = df_b.copy()
-            inv.columns = ['VIN', 'Year_Model', 'Age', 'Type', 'Location']
+        if st.sidebar.button("Run Simulation"):
+            # Prepare Inventory from Tab B: VINs, Year, Current Age, Type, Location
+            # We use .copy() and reset_index to prevent alignment errors
+            inv = df_b.copy().reset_index(drop=True)
             
             audit_trail = []
-            yearly_summary = []
+            viz_data = []
 
-            for y in range(1, sim_years + 1):
-                # 1. Aging
-                inv['Age'] += 1
+            for year in range(1, sim_years + 1):
+                # A. Increment Age
+                inv['Current Age'] += 1
                 
-                # 2. Identify Liquidations
-                # Match inventory to the MaxAge rules in reqs_cleaned
-                merged = inv.merge(reqs_cleaned[['Location', 'Type', 'MaxAge']], on=['Location', 'Type'], how='left')
+                # B. Handle Liquidation (The "Unalignable" Fix)
+                # We merge rules onto the inventory to find who exceeds MaxAge
+                sim_state = inv.merge(reqs_long[['Location', 'Type', 'MaxAge']], on=['Location', 'Type'], how='left')
                 
-                liquidated_mask = merged['Age'] > merged['MaxAge']
-                liquidated_units = inv[liquidated_mask].copy()
-                liquidated_units['Year_of_Liquidation'] = y
-                liquidated_units['Status'] = 'Liquidated'
-                audit_trail.append(liquidated_units)
+                # Identify liquidated rows
+                liquidated_idx = sim_state[sim_state['Current Age'] > sim_state['MaxAge']].index
                 
-                # Update Active Inventory
-                inv = inv[~liquidated_mask].copy()
-
-                # 3. Global Asset Logic (Vans)
-                # First, identify deficits and surpluses for Vans across all locations
-                van_reqs = reqs_cleaned[reqs_cleaned['Type'] == 'VAN']
-                
-                for _, row in van_reqs.iterrows():
-                    loc = row['Location']
-                    target = row['Target']
+                if not liquidated_idx.empty:
+                    liquidated_units = inv.loc[liquidated_idx].copy()
+                    liquidated_units['Year_of_Liquidation'] = year
+                    liquidated_units['Status'] = 'Liquidated'
+                    audit_trail.append(liquidated_units)
                     
+                    # Remove from active inventory and reset index to keep it clean for next year
+                    inv = inv.drop(liquidated_idx).reset_index(drop=True)
+
+                # C. Global Asset Logic (Vans)
+                # Check for Van deficits vs surpluses
+                van_reqs = reqs_long[reqs_long['Type'] == 'VAN']
+                for _, r in van_reqs.iterrows():
+                    loc, target = r['Location'], r['Target']
                     current_vans = inv[(inv['Location'] == loc) & (inv['Type'] == 'VAN')]
                     deficit = target - len(current_vans)
                     
                     if deficit > 0:
-                        # Search for surplus Vans at other locations
-                        for other_loc in reqs_cleaned['Location'].unique():
+                        # Find potential donors (Vans at other locations where count > target)
+                        for other_loc in reqs_long['Location'].unique():
                             if other_loc == loc or deficit <= 0: continue
                             
-                            other_target = reqs_cleaned[(reqs_cleaned['Location'] == other_loc) & (reqs_cleaned['Type'] == 'VAN')]['Target'].values[0]
-                            other_vans = inv[(inv['Location'] == other_loc) & (inv['Type'] == 'VAN')]
+                            o_target = reqs_long[(reqs_long['Location'] == other_loc) & (reqs_long['Type'] == 'VAN')]['Target'].values[0]
+                            o_vans = inv[(inv['Location'] == other_loc) & (inv['Type'] == 'VAN')]
                             
-                            surplus = len(other_vans) - other_target
+                            surplus = len(o_vans) - o_target
                             if surplus > 0:
                                 move_qty = min(surplus, deficit)
-                                # Move the oldest vans that are still within age limits
-                                vans_to_move = other_vans.sort_values('Age', ascending=False).head(move_qty)['VIN']
-                                inv.loc[inv['VIN'].isin(vans_to_move), 'Location'] = loc
+                                move_vins = o_vans.head(move_qty)['VINs'].values
+                                inv.loc[inv['VINs'].isin(move_vins), 'Location'] = loc
                                 deficit -= move_qty
                 
-                # 4. Final Year Count & Leasing Logic
-                for _, row in reqs_cleaned.iterrows():
-                    loc, v_type, target = row['Location'], row['Type'], row['Target']
-                    current_fleet = len(inv[(inv['Location'] == loc) & (inv['Type'] == v_type)])
+                # D. Record Yearly Metrics (Leased vs Liquidated)
+                for _, r in reqs_long.iterrows():
+                    loc, v_type, target = r['Location'], r['Type'], r['Target']
+                    actual_count = len(inv[(inv['Location'] == loc) & (inv['Type'] == v_type)])
                     
-                    final_deficit = max(0, target - current_fleet)
+                    needed_to_lease = max(0, target - actual_count)
                     
-                    yearly_summary.append({
-                        'Year': y,
+                    # Count liquidations for this specific location/type this year
+                    liq_count = 0
+                    if not liquidated_idx.empty:
+                        liq_count = len(liquidated_units[(liquidated_units['Location'] == loc) & (liquidated_units['Type'] == v_type)])
+
+                    viz_data.append({
+                        'Year': year,
                         'Location': loc,
                         'Type': v_type,
-                        'Leased': final_deficit,
-                        'Liquidated': len(liquidated_units[(liquidated_units['Location'] == loc) & (liquidated_units['Type'] == v_type)])
+                        'Leased': needed_to_lease,
+                        'Liquidated': liq_count
                     })
 
-            # --- Visuals & Reporting ---
-            st.divider()
-            full_audit_df = pd.concat(audit_trail).drop_duplicates('VIN')
-            viz_df = pd.DataFrame(yearly_summary)
+            # --- Results UI ---
+            res_df = pd.DataFrame(viz_data)
+            full_audit = pd.concat(audit_trail) if audit_trail else pd.DataFrame()
 
-            # High Level Cards
+            # Key Metric Cards
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Liquidated", len(full_audit_df))
-            c2.metric("Total Leased", viz_df['Leased'].sum())
-            c3.metric("Remaining Active Fleet", len(inv))
+            c1.metric("Total Liquidated", len(full_audit))
+            c2.metric("Total New Leases", res_df['Leased'].sum())
+            c3.metric("Final Active Fleet", len(inv))
 
-            # Waterfall / Heatmap Style Chart
-            st.subheader("Asset Flow Timeline")
-            # Image of a waterfall chart illustrating fleet replacement logic
+            # Waterfall Timeline (Stacked Bar)
+            st.subheader("Leasing vs Liquidation Waterfall")
             
             
-            # Pivot data for better visualization
-            viz_pivot = viz_df.groupby(['Year', 'Type'])[['Leased', 'Liquidated']].sum().reset_index()
-            fig = px.bar(viz_pivot, x="Year", y=["Leased", "Liquidated"], 
-                         barmode="group", color_discrete_sequence=["#FF4B4B", "#0068C9"],
-                         title="Global Fleet Churn: Leasing vs Liquidation by Year")
+            # Grouping by Year and Status for the chart
+            chart_df = res_df.groupby('Year')[['Leased', 'Liquidated']].sum().reset_index()
+            fig = px.bar(chart_df, x='Year', y=['Leased', 'Liquidated'], 
+                         title="Annual Fleet Replacement Requirements",
+                         color_discrete_map={"Leased": "#EF553B", "Liquidated": "#636EFA"},
+                         barmode='group')
             st.plotly_chart(fig, use_container_width=True)
 
-            # Audit Trail Table
+            # Audit Trail
             st.subheader("🔍 Searchable Audit Trail")
-            search = st.text_input("Filter by VIN or Location")
-            if search:
-                full_audit_df = full_audit_df[full_audit_df['VIN'].str.contains(search) | full_audit_df['Location'].str.contains(search)]
-            st.dataframe(full_audit_df, use_container_width=True)
+            st.dataframe(full_audit, use_container_width=True)
 
-            # Download
-            csv = full_audit_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Export Results to CSV", csv, "fleet_simulation.csv", "text/csv")
+            # CSV Download
+            if not full_audit.empty:
+                csv = full_audit.to_csv(index=False).encode('utf-8')
+                st.download_button("Download Audit Results", csv, "fleet_audit.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error: {e}. Please ensure Tab A columns match the requirements exactly.")
+        st.error(f"Simulation Error: {e}")
+        st.info("Ensure Tab A has: Location, End Year, Max age type A, Max age type C, Max age type VAN, Vehicle Count A, Vehicle Count C, Vehicle Count Van")
 
 else:
-    st.info("Upload your Excel file to begin. Note: Ensure Tab A has columns: Location, End Year, Max age type A/C/VAN, and Vehicle Count A/C/VAN.")
+    st.warning("Please upload the Fleet Excel file to begin.")
