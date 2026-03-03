@@ -171,26 +171,32 @@ if uploaded_file:
                 
             st.dataframe(display_audit, use_container_width=True)
 
-            # Export Excel with Yearly Tabs
+            # Export Excel with Yearly & Type Tabs
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 # Tab 1: High level summary of all leases
                 lease_df.to_excel(writer, sheet_name='Lease Summary', index=False)
                 
-                # Create a specific tab for EVERY year
+                # Sort logically: Assigned -> Leased -> Spare -> Liquidated
+                status_order = {'Assigned': 1, 'Leased': 2, 'Spare': 3, 'Liquidated': 4}
+                
+                # Create a specific tab for EVERY year and EVERY type (A_2025, C_2025, VAN_2025...)
                 for out_year in range(start_year, max_end_year + 1):
                     year_df = audit_df[audit_df['Calendar_Year'] == out_year].copy()
                     
-                    # Sort logically: Assigned -> Leased -> Spare -> Liquidated
-                    status_order = {'Assigned': 1, 'Leased': 2, 'Spare': 3, 'Liquidated': 4}
-                    year_df['Order'] = year_df['Status'].map(status_order)
-                    year_df = year_df.sort_values(['Order', 'Assigned_Location']).drop(columns=['Order'])
-                    
-                    # Name the tab A_2025, A_2026, etc.
-                    year_df.to_excel(writer, sheet_name=f'A_{out_year}', index=False)
+                    for v_type in ['A', 'C', 'VAN']:
+                        type_year_df = year_df[year_df['Type'] == v_type].copy()
+                        
+                        if not type_year_df.empty:
+                            type_year_df['Order'] = type_year_df['Status'].map(status_order)
+                            type_year_df = type_year_df.sort_values(['Order', 'Assigned_Location']).drop(columns=['Order'])
+                            
+                            # Name the tab A_2025, C_2025, VAN_2025, etc.
+                            sheet_name = f"{v_type}_{out_year}"
+                            type_year_df.to_excel(writer, sheet_name=sheet_name, index=False)
             
             st.download_button(
-                label="📥 Download Full Yearly Audit (Excel)",
+                label="📥 Download Full Yearly & Type Audit (Excel)",
                 data=output.getvalue(),
                 file_name="Yearly_Fleet_Audit_Tabs.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
