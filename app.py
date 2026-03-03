@@ -3,27 +3,26 @@ import pandas as pd
 import plotly.express as px
 import io
 
-st.set_page_config(page_title="Global Fleet Rescue Optimizer", layout="wide")
+st.set_page_config(page_title="Global Pool Optimizer", layout="wide")
 
-st.title("🚌 Fleet Rescue & Lease Minimizer")
+st.title("🌍 Global Fleet Pool & Optimization Engine")
 st.markdown("""
-**Optimization Strategy:**
-1. **Identify Homeless:** Vehicles that exceed their *current* location's Max Age are placed in a Rescue Pool.
-2. **Rescue & Relocate:** The system attempts to move these Homeless units to other locations that have a higher Max Age allowance and a deficit.
-3. **Lease:** Only triggered if the Rescue Pool and Surplus units cannot fill a local deficit.
+**Strategy:** Treat all inventory as a **Global Pool**. Every year, allocate vehicles to locations by prioritizing the **strictest age constraints first** and assigning the **oldest valid vehicles** to preserve younger assets for future use.
 """)
 
-uploaded_file = st.file_uploader("Upload Excel Fleet Data", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel Fleet Data", type=["xlsx", "csv"])
 
 if uploaded_file:
     try:
-        df_a = pd.read_excel(uploaded_file, sheet_name=0) 
-        df_b = pd.read_excel(uploaded_file, sheet_name=1)
+        # Support both CSV and Excel for flexibility based on your uploads
+        if uploaded_file.name.endswith('.csv'):
+            st.error("Please upload the original Excel file (.xlsx) containing both Tabs.")
+            st.stop()
+        else:
+            df_a = pd.read_excel(uploaded_file, sheet_name=0) 
+            df_b = pd.read_excel(uploaded_file, sheet_name=1)
 
-        start_year = 2025
-        end_year_limit = int(df_a['End Year'].max())
-        
-        # Unpivot Tab A
+        # 1. Clean and Prepare Tab A (Requirements)
         mapping = [
             {'Type': 'A', 'MaxAge': 'Max age type A', 'Target': 'Vehicle Count A'},
             {'Type': 'C', 'MaxAge': 'Max age type C', 'Target': 'Vehicle Count C'},
@@ -36,142 +35,165 @@ if uploaded_file:
             temp['Type'] = item['Type']
             temp = temp.rename(columns={item['MaxAge']: 'MaxAge', item['Target']: 'Target', 'End Year': 'EndYear'})
             req_list.append(temp)
-        reqs_long = pd.concat(req_list, ignore_index=True)
+        
+        reqs = pd.concat(req_list, ignore_index=True)
+        # Clean Types to ensure matching
+        reqs['Type'] = reqs['Type'].astype(str).str.upper().str.strip()
+        
+        # 2. Clean and Prepare Tab B (Global Inventory Pool)
+        # We drop 'Location' because it's a global pool!
+        inv = df_b[['VINs', 'Current Age', 'Type']].copy()
+        inv['Type'] = inv['Type'].astype(str).str.upper().str.strip()
+        
+        start_year = 2025
+        max_end_year = int(reqs['EndYear'].max())
 
-        if st.sidebar.button("Run Rescue Simulation"):
-            inv = df_b[['VINs', 'Current Age', 'Type', 'Location']].copy().reset_index(drop=True)
-            journey_records = []
+        if st.sidebar.button("Run Global Pool Optimization"):
+            
+            audit_records = []
             lease_summary = []
             
-            # Initial State Log
-            start_state = inv.copy()
-            start_state['Calendar_Year'] = start_year
-            start_state['Event'] = 'Initial Inventory'
-            journey_records.append(start_state)
-
-            for current_year in range(start_year, end_year_limit + 1):
-                if current_year > start_year:
-                    inv['Current Age'] += 1
+            # Active Fleet Tracker
+            fleet = inv.copy()
+            
+            progress_bar = st.progress(0)
+            
+            # 3. Year-by-Year Simulation Loop
+            for year in range(start_year, max_end_year + 1):
+                # Age progression (if not the first year)
+                if year > start_year:
+                    fleet['Current Age'] += 1
                 
-                # --- A. Identify Homeless Vehicles ---
-                # Check against the MaxAge of their CURRENT location
-                sim_state = inv.merge(reqs_long[['Location', 'Type', 'MaxAge']], on=['Location', 'Type'], how='left')
-                invalid_mask = sim_state['Current Age'] > sim_state['MaxAge']
+                # We rebuild the pool for this year
+                available_pool = fleet.copy()
                 
-                homeless_pool = inv[invalid_mask].copy()
-                homeless_pool['Source'] = 'Homeless'
-                
-                # Keep only valid units in active inventory for now
-                inv = inv[~invalid_mask].reset_index(drop=True)
-
-                # --- B. Identify Surplus Vehicles ---
-                surplus_pool_list = []
+                # Process each Vehicle Type separately
                 for v_type in ['A', 'C', 'VAN']:
-                    for _, r in reqs_long[reqs_long['Type'] == v_type].iterrows():
-                        loc, target = r['Location'], r['Target']
-                        current_units = inv[(inv['Location'] == loc) & (inv['Type'] == v_type)]
-                        surplus_count = len(current_units) - target
+                    
+                    # Get all vehicles of this type currently in the pool
+                    type_pool = available_pool[available_pool['Type'] == v_type].copy()
+                    
+                    # Sort pool descending by age (Oldest first)
+                    # We want to assign the oldest possible valid vehicle to save young ones!
+                    type_pool = type_pool.sort_values('Current Age', ascending=False)
+                    
+                    # Get active location requirements for this year and type
+                    # Rule: If current year > EndYear, target is 0
+                    active_reqs = reqs[(reqs['Type'] == v_type) & (year <= reqs['EndYear'])].copy()
+                    
+                    # Sort requirements ascending by MaxAge (Strictest constraints first)
+                    active_reqs = active_reqs.sort_values('MaxAge', ascending=True)
+                    
+                    for _, req in active_reqs.iterrows():
+                        loc = req['Location']
+                        target = req['Target']
+                        max_age = req['MaxAge']
                         
-                        if surplus_count > 0:
-                            # Pull the youngest surplus units into the pool
-                            surplus_vins = current_units.sort_values('Current Age').head(surplus_count).copy()
-                            surplus_vins['Source'] = 'Surplus'
-                            surplus_pool_list.append(surplus_vins)
-                            # Remove them from active inventory so they can be redistributed
-                            inv = inv[~inv['VINs'].isin(surplus_vins['VINs'])]
-
-                # Combine Homeless and Surplus into one Master Pool
-                available_pool = pd.concat([homeless_pool] + surplus_pool_list, ignore_index=True) if surplus_pool_list or not homeless_pool.empty else pd.DataFrame(columns=inv.columns.tolist() + ['Source'])
-
-                # --- C. Rescue & Relocate Phase ---
-                for v_type in ['A', 'C', 'VAN']:
-                    type_reqs = reqs_long[reqs_long['Type'] == v_type]
-                    for _, r in type_reqs.iterrows():
-                        loc, target, max_age = r['Location'], r['Target'], r['MaxAge']
-                        current_valid = len(inv[(inv['Location'] == loc) & (inv['Type'] == v_type)])
-                        deficit = target - current_valid
+                        assigned_count = 0
                         
-                        if deficit > 0 and not available_pool.empty:
-                            # Find units in the pool that are legally allowed to operate at this location
-                            valid_in_pool = available_pool[(available_pool['Type'] == v_type) & (available_pool['Current Age'] <= max_age)].copy()
+                        # Try to assign vehicles from the pool
+                        for _ in range(int(target)):
+                            # Find vehicles in pool that are <= this location's MaxAge
+                            valid_vins = type_pool[type_pool['Current Age'] <= max_age]
                             
-                            if not valid_in_pool.empty:
-                                # Prioritize saving "Homeless" units first to prevent liquidation
-                                valid_in_pool['Priority'] = valid_in_pool['Source'].apply(lambda x: 0 if x == 'Homeless' else 1)
-                                to_move = valid_in_pool.sort_values(['Priority', 'Current Age']).head(deficit)
+                            if not valid_vins.empty:
+                                # Pick the first one (which is the oldest valid one because we sorted)
+                                chosen_vin_idx = valid_vins.index[0]
+                                chosen_vehicle = type_pool.loc[chosen_vin_idx]
                                 
-                                for _, unit in to_move.iterrows():
-                                    v_id = unit['VINs']
-                                    original_loc = unit['Location']
-                                    
-                                    # Update and return to active inventory
-                                    new_row = unit.drop(['Source', 'Priority'])
-                                    new_row['Location'] = loc
-                                    inv = pd.concat([inv, pd.DataFrame([new_row])], ignore_index=True)
-                                    
-                                    # Log the rescue/move
-                                    log = new_row.copy()
-                                    log['Calendar_Year'] = current_year
-                                    log['Event'] = 'RESCUED (Saved from Liquidation)' if unit['Source'] == 'Homeless' else f'SHUFFLED (From {original_loc})'
-                                    journey_records.append(log)
-                                    
-                                    # Remove from available pool
-                                    available_pool = available_pool[available_pool['VINs'] != v_id]
-                                    deficit -= 1
+                                # Log the assignment
+                                audit_records.append({
+                                    'Calendar_Year': year,
+                                    'VINs': chosen_vehicle['VINs'],
+                                    'Type': v_type,
+                                    'Current Age': chosen_vehicle['Current Age'],
+                                    'Assigned_Location': loc,
+                                    'Status': 'Assigned'
+                                })
+                                
+                                # Remove from the pool so it can't be used twice
+                                type_pool = type_pool.drop(chosen_vin_idx)
+                                assigned_count += 1
+                            else:
+                                # No valid vehicles left for this requirement
+                                break
+                        
+                        # Calculate Leases
+                        deficit = int(target) - assigned_count
+                        lease_summary.append({
+                            'Calendar_Year': year,
+                            'Location': loc,
+                            'Type': v_type,
+                            'Target': target,
+                            'Assigned_From_Pool': assigned_count,
+                            'New_Leases_Required': max(0, deficit)
+                        })
 
-                # --- D. Final Cleanup & Lease Calculation ---
-                # Any Homeless units left in the pool that couldn't find a valid location are officially liquidated
-                if not available_pool.empty:
-                    liquidated = available_pool[available_pool['Source'] == 'Homeless']
-                    for _, unit in liquidated.iterrows():
-                        log = unit.drop(['Source']).copy()
-                        log['Calendar_Year'] = current_year
-                        log['Event'] = 'LIQUIDATED (No valid location found)'
-                        journey_records.append(log)
-                    
-                    # Any Surplus units left just return to their original location
-                    leftovers = available_pool[available_pool['Source'] == 'Surplus'].drop(columns=['Source'])
-                    if not leftovers.empty:
-                        inv = pd.concat([inv, leftovers], ignore_index=True)
+                    # Any vehicles left in the pool that weren't assigned are 'Unassigned/Spare'
+                    for _, unassigned in type_pool.iterrows():
+                        audit_records.append({
+                            'Calendar_Year': year,
+                            'VINs': unassigned['VINs'],
+                            'Type': v_type,
+                            'Current Age': unassigned['Current Age'],
+                            'Assigned_Location': 'GLOBAL POOL (Unused)',
+                            'Status': 'Unassigned/Spare'
+                        })
+                        
+                progress_bar.progress((year - start_year + 1) / (max_end_year - start_year + 1))
 
-                # Record final leases needed
-                for _, r in reqs_long.iterrows():
-                    l, t, target = r['Location'], r['Type'], r['Target']
-                    final_count = len(inv[(inv['Location'] == l) & (inv['Type'] == t)])
-                    needed = max(0, int(target - final_count))
-                    
-                    lease_summary.append({
-                        'Calendar_Year': current_year,
-                        'Location': l,
-                        'Type': t,
-                        'Active_Fleet': final_count,
-                        'New_Leases_Required': needed
-                    })
-                
-                # Log Active State
-                active_log = inv.copy()
-                active_log['Calendar_Year'] = current_year
-                active_log['Event'] = 'Active'
-                journey_records.append(active_log)
-
-            # --- Output & Export ---
-            full_journey_df = pd.concat(journey_records, ignore_index=True).sort_values(['VINs', 'Calendar_Year'])
+            # --- Presentation & Export ---
+            audit_df = pd.DataFrame(audit_records)
             lease_df = pd.DataFrame(lease_summary)
 
-            st.subheader("Global New Leases Required Over Time")
-            fig = px.bar(lease_df[lease_df['New_Leases_Required'] > 0], x='Calendar_Year', y='New_Leases_Required', color='Location')
+            # Top level metrics
+            st.divider()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Leases Needed (Over Simulation)", lease_df['New_Leases_Required'].sum())
+            c2.metric("Total Vehicles in Global Pool", len(inv))
+            c3.metric("Simulation End Year", max_end_year)
+
+            # Visualizations
+            st.subheader("Global Lease Requirements by Year")
+            # Group by year to see the trend
+            yearly_leases = lease_df.groupby('Calendar_Year')['New_Leases_Required'].sum().reset_index()
+            fig = px.bar(yearly_leases, x='Calendar_Year', y='New_Leases_Required', 
+                         title="Total Network Deficit (Leases Triggered)",
+                         labels={'New_Leases_Required': 'Leased Units'})
             st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("🔍 Master VIN Journey (Watch the Rescues)")
-            st.markdown("Search a VIN to see if it was **RESCUED** and moved to a 'Spare' location to avoid liquidation.")
-            st.dataframe(full_journey_df.head(100), use_container_width=True)
+            # Detailed Lease Table
+            st.subheader("📋 Lease Trigger Log")
+            st.dataframe(lease_df[lease_df['New_Leases_Required'] > 0].sort_values(['Calendar_Year', 'Location']), use_container_width=True)
 
+            # VIN Audit Trail
+            st.subheader("🔍 Global Pool Allocation Audit")
+            st.markdown("Shows exactly where the algorithm deployed each VIN year-over-year.")
+            search = st.text_input("Filter by VIN or Location")
+            
+            display_audit = audit_df.copy()
+            if search:
+                display_audit = display_audit[display_audit['VINs'].astype(str).str.contains(search, case=False) | 
+                                              display_audit['Assigned_Location'].astype(str).str.contains(search, case=False)]
+                
+            st.dataframe(display_audit, use_container_width=True)
+
+            # Export Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                lease_df.to_excel(writer, sheet_name='Lease Requirements', index=False)
-                full_journey_df.to_excel(writer, sheet_name='VIN Journey Audit', index=False)
+                lease_df.to_excel(writer, sheet_name='Lease Schedule', index=False)
+                audit_df.to_excel(writer, sheet_name='VIN Allocations', index=False)
             
-            st.download_button("📥 Download Rescue & Relocation Report", output.getvalue(), "Fleet_Rescue_Report.xlsx")
+            st.download_button(
+                label="📥 Download Optimal Fleet Allocation (Excel)",
+                data=output.getvalue(),
+                file_name="Optimal_Global_Pool_Allocation.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Execution Error: {e}")
+        st.info("Ensure the Excel file contains your original Tab A (Location, End Year, Max Age, etc.) and Tab B (VINs, Current Age, Type).")
+
+else:
+    st.info("Upload the Fleet Excel Data. The algorithm will automatically pool all assets and distribute them perfectly against the End Year and Max Age bounds.")
