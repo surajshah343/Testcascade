@@ -7,14 +7,13 @@ st.set_page_config(page_title="Global Pool Optimizer", layout="wide")
 
 st.title("🌍 Global Fleet Pool & Optimization Engine")
 st.markdown("""
-**Strategy:** Treat all inventory as a **Global Pool**. Every year, allocate vehicles to locations by prioritizing the **strictest age constraints first** and assigning the **oldest valid vehicles** to preserve younger assets for future use.
+**Strategy:** Treat all inventory as a **Global Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
 """)
 
 uploaded_file = st.file_uploader("Upload Excel Fleet Data", type=["xlsx", "csv"])
 
 if uploaded_file:
     try:
-        # Support both CSV and Excel for flexibility based on your uploads
         if uploaded_file.name.endswith('.csv'):
             st.error("Please upload the original Excel file (.xlsx) containing both Tabs.")
             st.stop()
@@ -37,11 +36,9 @@ if uploaded_file:
             req_list.append(temp)
         
         reqs = pd.concat(req_list, ignore_index=True)
-        # Clean Types to ensure matching
         reqs['Type'] = reqs['Type'].astype(str).str.upper().str.strip()
         
         # 2. Clean and Prepare Tab B (Global Inventory Pool)
-        # We drop 'Location' because it's a global pool!
         inv = df_b[['VINs', 'Current Age', 'Type']].copy()
         inv['Type'] = inv['Type'].astype(str).str.upper().str.strip()
         
@@ -60,28 +57,19 @@ if uploaded_file:
             
             # 3. Year-by-Year Simulation Loop
             for year in range(start_year, max_end_year + 1):
-                # Age progression (if not the first year)
                 if year > start_year:
                     fleet['Current Age'] += 1
                 
-                # We rebuild the pool for this year
                 available_pool = fleet.copy()
                 
-                # Process each Vehicle Type separately
                 for v_type in ['A', 'C', 'VAN']:
+                    # Get absolute max age for this type company-wide to determine true "Liquidation"
+                    company_max_age = reqs[reqs['Type'] == v_type]['MaxAge'].max()
                     
-                    # Get all vehicles of this type currently in the pool
                     type_pool = available_pool[available_pool['Type'] == v_type].copy()
-                    
-                    # Sort pool descending by age (Oldest first)
-                    # We want to assign the oldest possible valid vehicle to save young ones!
                     type_pool = type_pool.sort_values('Current Age', ascending=False)
                     
-                    # Get active location requirements for this year and type
-                    # Rule: If current year > EndYear, target is 0
                     active_reqs = reqs[(reqs['Type'] == v_type) & (year <= reqs['EndYear'])].copy()
-                    
-                    # Sort requirements ascending by MaxAge (Strictest constraints first)
                     active_reqs = active_reqs.sort_values('MaxAge', ascending=True)
                     
                     for _, req in active_reqs.iterrows():
@@ -91,17 +79,14 @@ if uploaded_file:
                         
                         assigned_count = 0
                         
-                        # Try to assign vehicles from the pool
+                        # Process Assignments
                         for _ in range(int(target)):
-                            # Find vehicles in pool that are <= this location's MaxAge
                             valid_vins = type_pool[type_pool['Current Age'] <= max_age]
                             
                             if not valid_vins.empty:
-                                # Pick the first one (which is the oldest valid one because we sorted)
                                 chosen_vin_idx = valid_vins.index[0]
                                 chosen_vehicle = type_pool.loc[chosen_vin_idx]
                                 
-                                # Log the assignment
                                 audit_records.append({
                                     'Calendar_Year': year,
                                     'VINs': chosen_vehicle['VINs'],
@@ -111,83 +96,103 @@ if uploaded_file:
                                     'Status': 'Assigned'
                                 })
                                 
-                                # Remove from the pool so it can't be used twice
                                 type_pool = type_pool.drop(chosen_vin_idx)
                                 assigned_count += 1
                             else:
-                                # No valid vehicles left for this requirement
                                 break
                         
-                        # Calculate Leases
+                        # Process Deficits / Leases
                         deficit = int(target) - assigned_count
-                        lease_summary.append({
-                            'Calendar_Year': year,
-                            'Location': loc,
-                            'Type': v_type,
-                            'Target': target,
-                            'Assigned_From_Pool': assigned_count,
-                            'New_Leases_Required': max(0, deficit)
-                        })
+                        if deficit > 0:
+                            # Log leases directly into the audit trail as unique items
+                            for i in range(deficit):
+                                audit_records.append({
+                                    'Calendar_Year': year,
+                                    'VINs': f'NEW_LEASE_{loc}_{v_type}_{i+1}',
+                                    'Type': v_type,
+                                    'Current Age': 0,
+                                    'Assigned_Location': loc,
+                                    'Status': 'Leased'
+                                })
+                            
+                            lease_summary.append({
+                                'Calendar_Year': year,
+                                'Location': loc,
+                                'Type': v_type,
+                                'Target': target,
+                                'Assigned_From_Pool': assigned_count,
+                                'New_Leases_Required': deficit
+                            })
 
-                    # Any vehicles left in the pool that weren't assigned are 'Unassigned/Spare'
+                    # Process Leftovers (Liquidated vs Spare)
                     for _, unassigned in type_pool.iterrows():
+                        # If it exceeds the max age of the most lenient location, it is Liquidated
+                        is_liquidated = unassigned['Current Age'] > company_max_age
+                        
                         audit_records.append({
                             'Calendar_Year': year,
                             'VINs': unassigned['VINs'],
                             'Type': v_type,
                             'Current Age': unassigned['Current Age'],
-                            'Assigned_Location': 'GLOBAL POOL (Unused)',
-                            'Status': 'Unassigned/Spare'
+                            'Assigned_Location': 'RETIRED' if is_liquidated else 'GLOBAL POOL',
+                            'Status': 'Liquidated' if is_liquidated else 'Spare'
                         })
                         
                 progress_bar.progress((year - start_year + 1) / (max_end_year - start_year + 1))
 
             # --- Presentation & Export ---
             audit_df = pd.DataFrame(audit_records)
-            lease_df = pd.DataFrame(lease_summary)
+            lease_df = pd.DataFrame(lease_summary) if lease_summary else pd.DataFrame(columns=['Calendar_Year', 'Location', 'Type', 'Target', 'Assigned_From_Pool', 'New_Leases_Required'])
 
-            # Top level metrics
             st.divider()
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Leases Needed (Over Simulation)", lease_df['New_Leases_Required'].sum())
-            c2.metric("Total Vehicles in Global Pool", len(inv))
+            c1.metric("Total Leases Needed (Over Simulation)", lease_df['New_Leases_Required'].sum() if not lease_df.empty else 0)
+            c2.metric("Total Vehicles Liquidated", audit_df[audit_df['Status'] == 'Liquidated']['VINs'].nunique())
             c3.metric("Simulation End Year", max_end_year)
 
-            # Visualizations
             st.subheader("Global Lease Requirements by Year")
-            # Group by year to see the trend
-            yearly_leases = lease_df.groupby('Calendar_Year')['New_Leases_Required'].sum().reset_index()
-            fig = px.bar(yearly_leases, x='Calendar_Year', y='New_Leases_Required', 
-                         title="Total Network Deficit (Leases Triggered)",
-                         labels={'New_Leases_Required': 'Leased Units'})
-            st.plotly_chart(fig, use_container_width=True)
+            if not lease_df.empty:
+                yearly_leases = lease_df.groupby('Calendar_Year')['New_Leases_Required'].sum().reset_index()
+                fig = px.bar(yearly_leases, x='Calendar_Year', y='New_Leases_Required', 
+                             title="Total Network Deficit (Leases Triggered)")
+                st.plotly_chart(fig, use_container_width=True)
 
-            # Detailed Lease Table
             st.subheader("📋 Lease Trigger Log")
-            st.dataframe(lease_df[lease_df['New_Leases_Required'] > 0].sort_values(['Calendar_Year', 'Location']), use_container_width=True)
+            st.dataframe(lease_df.sort_values(['Calendar_Year', 'Location']) if not lease_df.empty else lease_df, use_container_width=True)
 
-            # VIN Audit Trail
             st.subheader("🔍 Global Pool Allocation Audit")
-            st.markdown("Shows exactly where the algorithm deployed each VIN year-over-year.")
-            search = st.text_input("Filter by VIN or Location")
+            search = st.text_input("Filter by VIN, Status (Assigned, Liquidated, Leased), or Location")
             
             display_audit = audit_df.copy()
             if search:
                 display_audit = display_audit[display_audit['VINs'].astype(str).str.contains(search, case=False) | 
+                                              display_audit['Status'].astype(str).str.contains(search, case=False) |
                                               display_audit['Assigned_Location'].astype(str).str.contains(search, case=False)]
                 
             st.dataframe(display_audit, use_container_width=True)
 
-            # Export Excel
+            # Export Excel with Yearly Tabs
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                lease_df.to_excel(writer, sheet_name='Lease Schedule', index=False)
-                audit_df.to_excel(writer, sheet_name='VIN Allocations', index=False)
+                # Tab 1: High level summary of all leases
+                lease_df.to_excel(writer, sheet_name='Lease Summary', index=False)
+                
+                # Create a specific tab for EVERY year
+                for out_year in range(start_year, max_end_year + 1):
+                    year_df = audit_df[audit_df['Calendar_Year'] == out_year].copy()
+                    
+                    # Sort logically: Assigned -> Leased -> Spare -> Liquidated
+                    status_order = {'Assigned': 1, 'Leased': 2, 'Spare': 3, 'Liquidated': 4}
+                    year_df['Order'] = year_df['Status'].map(status_order)
+                    year_df = year_df.sort_values(['Order', 'Assigned_Location']).drop(columns=['Order'])
+                    
+                    # Name the tab A_2025, A_2026, etc.
+                    year_df.to_excel(writer, sheet_name=f'A_{out_year}', index=False)
             
             st.download_button(
-                label="📥 Download Optimal Fleet Allocation (Excel)",
+                label="📥 Download Full Yearly Audit (Excel)",
                 data=output.getvalue(),
-                file_name="Optimal_Global_Pool_Allocation.xlsx",
+                file_name="Yearly_Fleet_Audit_Tabs.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
@@ -196,4 +201,4 @@ if uploaded_file:
         st.info("Ensure the Excel file contains your original Tab A (Location, End Year, Max Age, etc.) and Tab B (VINs, Current Age, Type).")
 
 else:
-    st.info("Upload the Fleet Excel Data. The algorithm will automatically pool all assets and distribute them perfectly against the End Year and Max Age bounds.")
+    st.info("Upload the Fleet Excel Data.")
