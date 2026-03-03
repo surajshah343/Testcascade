@@ -6,16 +6,16 @@ import io
 st.set_page_config(page_title="Fleet Journey Optimizer", layout="wide")
 
 st.title("🚛 Fleet Lifecycle & VIN Journey Tracker")
-st.markdown("This simulation minimizes leases by cascading assets and tracks the **full location history** for every VIN.")
 
-uploaded_file = st.file_uploader("Upload Fleet Excel File", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel Fleet Data", type=["xlsx"])
 
 if uploaded_file:
     try:
+        # Load Tabs
         df_a = pd.read_excel(uploaded_file, sheet_name=0) 
         df_b = pd.read_excel(uploaded_file, sheet_name=1)
 
-        # 1. Unpivot Requirements (Tab A) using exact columns provided
+        # 1. Unpivot Requirements (Tab A) - Exact Column Mapping
         mapping = [
             {'Type': 'A', 'MaxAge': 'Max age type A', 'Target': 'Vehicle Count A'},
             {'Type': 'C', 'MaxAge': 'Max age type C', 'Target': 'Vehicle Count C'},
@@ -33,18 +33,19 @@ if uploaded_file:
         sim_years = st.sidebar.slider("Simulation Years", 1, 15, 10)
         
         if st.sidebar.button("Run Simulation & Generate Journey Log"):
-            # Initialize Inventory and History
+            # Initial Inventory: VINs, Year, Current Age, Type, Location
             inv = df_b.copy().reset_index(drop=True)
             
-            # Start the journey log with initial state
-            journey_log = inv.copy()
-            journey_log['Year'] = 0
-            journey_log['Event'] = 'Initial Inventory'
+            # Tracking list for VIN history
+            journey_records = []
+            
+            # Capture Year 0 (Starting State)
+            start_state = inv.copy()
+            start_state['Simulation_Year'] = 0
+            start_state['Event'] = 'Initial Inventory'
+            journey_records.append(start_state)
             
             lease_summary = []
-            
-            # Active tracking list
-            journey_records = [journey_log]
 
             for year in range(1, sim_years + 1):
                 # A. Aging
@@ -56,7 +57,7 @@ if uploaded_file:
                 
                 if liq_mask.any():
                     liquidated_vins = inv[liq_mask].copy()
-                    liquidated_vins['Year'] = year
+                    liquidated_vins['Simulation_Year'] = year
                     liquidated_vins['Event'] = 'LIQUIDATED (Age Limit)'
                     journey_records.append(liquidated_vins)
                     
@@ -69,7 +70,6 @@ if uploaded_file:
                     deficit = target - current_count
                     
                     if deficit > 0:
-                        # Find Surplus Donors
                         for donor_loc in reqs_long[reqs_long['Location'] != loc]['Location'].unique():
                             if deficit <= 0: break
                             
@@ -81,15 +81,15 @@ if uploaded_file:
                                 move_qty = min(surplus, deficit)
                                 move_vins = d_vans.sort_values('Current Age').head(move_qty)['VINs'].values
                                 
+                                # Update actual inventory
+                                inv.loc[inv['VINs'].isin(move_vins), 'Location'] = loc
+                                
                                 # Log the movement
                                 moved_units = inv[inv['VINs'].isin(move_vins)].copy()
-                                moved_units['Location'] = loc # Update location in log
-                                moved_units['Year'] = year
+                                moved_units['Simulation_Year'] = year
                                 moved_units['Event'] = f'CASCADED (From {donor_loc})'
                                 journey_records.append(moved_units)
                                 
-                                # Update actual inventory
-                                inv.loc[inv['VINs'].isin(move_vins), 'Location'] = loc
                                 deficit -= move_qty
 
                 # D. Calculate Leasing Needs
@@ -106,46 +106,43 @@ if uploaded_file:
                         'Fleet_Count': final_count
                     })
 
-            # --- Finalize Output ---
-            master_journey = pd.concat(journey_records, ignore_index=True).sort_values(['VINs', 'Year'])
+            # --- Finalize Results ---
+            master_journey = pd.concat(journey_records, ignore_index=True).sort_values(['VINs', 'Simulation_Year'])
             lease_df = pd.DataFrame(lease_summary)
 
-            # --- Visualizations ---
+            # --- Dashboard Visuals ---
             st.subheader("Total Leasing Requirements by Year")
             
             
             fig = px.bar(lease_df[lease_df['Leases_Needed'] > 0], x='Year', y='Leases_Needed', color='Location',
-                         title="Required New Leases (Post-Cascade Optimization)")
+                         title="Required New Leases (Post-Optimization)")
             st.plotly_chart(fig, use_container_width=True)
 
-            # --- UI Display ---
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.subheader("Summary Table")
-                st.dataframe(lease_df[lease_df['Leases_Needed'] > 0], use_container_width=True)
-            
-            with col2:
-                st.subheader("VIN Journey Audit Trail")
-                search_vin = st.text_input("Filter Journey by VIN")
-                if search_vin:
-                    st.dataframe(master_journey[master_journey['VINs'].astype(str).contains(search_vin)], use_container_width=True)
-                else:
-                    st.dataframe(master_journey.head(100), use_container_width=True)
+            # --- Audit Trail View ---
+            st.subheader("VIN Journey Audit Trail")
+            search_vin = st.text_input("Search Journey by VIN")
+            if search_vin:
+                st.dataframe(master_journey[master_journey['VINs'].astype(str).contains(search_vin)], use_container_width=True)
+            else:
+                st.dataframe(master_journey.head(50), use_container_width=True)
 
-            # --- Excel Export Logic ---
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            # --- Fixed Excel Export Logic ---
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 lease_df.to_excel(writer, sheet_name='Lease Requirements', index=False)
                 master_journey.to_excel(writer, sheet_name='VIN Journey Audit', index=False)
-                
+            
+            processed_data = output.getvalue()
+            
             st.download_button(
                 label="📥 Download Optimization Report (Excel)",
-                data=buffer.getvalue(),
+                data=processed_data,
                 file_name="Fleet_Optimization_Report.xlsx",
-                mime="application/vnd.ms-excel"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
     except Exception as e:
         st.error(f"Error: {e}")
+        st.info("Check if your columns match: Location, End Year, Max age type A, Max age type C, Max age type VAN, Vehicle Count A, Vehicle Count C, Vehicle Count Van")
 else:
-    st.info("Upload your Excel file to generate the multi-year cascade and leasing report.")
+    st.info("Awaiting Excel upload. Please ensure your columns match the requirements exactly.")
