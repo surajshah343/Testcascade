@@ -126,7 +126,15 @@ if uploaded_file:
             full_journey_df = full_journey_df.sort_values(['VINs', 'Calendar_Year', 'Event'])
             
             lease_df = pd.DataFrame(lease_summary)
-
+            # Calculate totals
+            total_leases = lease_df['New_Leases_Required'].sum()
+            total_liquidated = full_journey_df[full_journey_df['Event'] == 'LIQUIDATED']['VINs'].nunique()
+            
+            # Top Level Metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Leases Triggered", f"{total_leases} units")
+            col2.metric("Total Units Liquidated", f"{total_liquidated} units")
+            col3.metric("Leases Avoided (via Cascading)", "Calculated") # Optional logic to show savings
             # --- Visual Dashboard ---
             st.subheader("Yearly Lease Waterfall")
             
