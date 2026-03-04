@@ -3,12 +3,12 @@ import pandas as pd
 import plotly.express as px
 import io
 
-st.set_page_config(page_title="Fleet Cascade Optimizer", layout="wide")
+st.set_page_config(page_title="Cascade Optimizer", layout="wide")
 
-st.title("🌍 Fleet Pool & Optimization Engine by Suraj Shah")
-st.markdown("""
-**Strategy:** Treat all inventory as a **Global Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
-""")
+st.title("🌍 Fleet Pool & Optimization Engine")
+#st.markdown("""
+#**Strategy:** Treat all inventory as a **seperate Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
+#""")
 
 uploaded_file = st.file_uploader("Upload Excel Fleet Data", type=["xlsx", "csv"])
 
@@ -45,7 +45,7 @@ if uploaded_file:
         start_year = 2025
         max_end_year = int(reqs['EndYear'].max())
 
-        if st.sidebar.button("Run Global Pool Optimization"):
+        if st.sidebar.button("Run Pool Optimization"):
             
             audit_records = []
             lease_summary = []
@@ -173,12 +173,19 @@ if uploaded_file:
             c2.metric("Total Vehicles Liquidated", audit_df[audit_df['Status'] == 'Liquidated']['VINs'].nunique())
             c3.metric("Simulation End Year", max_end_year)
 
-            st.subheader("Global Lease Requirements by Year")
+            st.subheader("Lease Requirements by Year")
             if not lease_df.empty:
                 yearly_leases = lease_df.groupby('Calendar_Year')['New_Leases_Required'].sum().reset_index()
                 fig = px.bar(yearly_leases, x='Calendar_Year', y='New_Leases_Required', 
                              title="Total Network Deficit (Leases Triggered)")
                 st.plotly_chart(fig, use_container_width=True)
+
+            # --- NEW ADDITION: Yearly Summary ---
+            st.subheader("📅 Yearly Summary")
+            if not lease_df.empty:
+                yearly_summary = lease_df.groupby('Calendar_Year')[['New_Leases_Required', 'Units_Liquidated']].sum().reset_index()
+                st.dataframe(yearly_summary, use_container_width=True)
+            # ------------------------------------
 
             st.subheader("📋 Lease & Liquidation Log")
             st.dataframe(lease_df.sort_values(['Calendar_Year', 'Location']) if not lease_df.empty else lease_df, use_container_width=True)
