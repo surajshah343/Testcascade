@@ -26,7 +26,7 @@ def check_password():
                 st.error("😕 Password incorrect")
     return False
 
-
+# Removed the floating @st.cache_data decorator here which was causing the SyntaxError
 
 st.set_page_config(page_title="Cascade Optimizer", layout="wide")
 
