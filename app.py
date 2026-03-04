@@ -26,7 +26,7 @@ def check_password():
                 st.error("😕 Password incorrect")
     return False
 
-@st.cache_data
+
 
 st.set_page_config(page_title="Cascade Optimizer", layout="wide")
 
