@@ -5,7 +5,7 @@ import io
 
 st.set_page_config(page_title="Global Pool Optimizer", layout="wide")
 
-st.title("🌍 Global Fleet Pool & Optimization Engine")
+st.title("🌍 Fleet Pool & Optimization Engine by Suraj Shah")
 st.markdown("""
 **Strategy:** Treat all inventory as a **Global Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
 """)
