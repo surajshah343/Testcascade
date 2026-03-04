@@ -5,7 +5,7 @@ import io
 
 st.set_page_config(page_title="Global Pool Optimizer", layout="wide")
 
-st.title("🌍 Fleet Pool & Optimization Engine by Suraj Shah")
+st.title("🌍 Global Fleet Pool & Optimization Engine")
 st.markdown("""
 **Strategy:** Treat all inventory as a **Global Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
 """)
@@ -61,6 +61,7 @@ if uploaded_file:
                     fleet['Current Age'] += 1
                 
                 available_pool = fleet.copy()
+                liquidated_this_year = [] # Track what to remove permanently
                 
                 for v_type in ['A', 'C', 'VAN']:
                     # Get absolute max age for this type company-wide to determine true "Liquidation"
@@ -115,19 +116,25 @@ if uploaded_file:
                                     'Status': 'Leased'
                                 })
                             
-                            lease_summary.append({
-                                'Calendar_Year': year,
-                                'Location': loc,
-                                'Type': v_type,
-                                'Target': target,
-                                'Assigned_From_Pool': assigned_count,
-                                'New_Leases_Required': deficit
-                            })
+                        lease_summary.append({
+                            'Calendar_Year': year,
+                            'Location': loc,
+                            'Type': v_type,
+                            'Target': target,
+                            'Assigned_From_Pool': assigned_count,
+                            'New_Leases_Required': max(0, deficit),
+                            'Units_Liquidated': 0  # Standard location rows have 0 liquidations
+                        })
 
                     # Process Leftovers (Liquidated vs Spare)
+                    liquidated_count = 0
                     for _, unassigned in type_pool.iterrows():
                         # If it exceeds the max age of the most lenient location, it is Liquidated
                         is_liquidated = unassigned['Current Age'] > company_max_age
+                        
+                        if is_liquidated:
+                            liquidated_count += 1
+                            liquidated_this_year.append(unassigned['VINs'])
                         
                         audit_records.append({
                             'Calendar_Year': year,
@@ -137,12 +144,28 @@ if uploaded_file:
                             'Assigned_Location': 'RETIRED' if is_liquidated else 'GLOBAL POOL',
                             'Status': 'Liquidated' if is_liquidated else 'Spare'
                         })
+                    
+                    # Add a dedicated row so the Units_Liquidated column populates correctly for the year/type
+                    if liquidated_count > 0:
+                        lease_summary.append({
+                            'Calendar_Year': year,
+                            'Location': 'RETIRED POOL',
+                            'Type': v_type,
+                            'Target': 0,
+                            'Assigned_From_Pool': 0,
+                            'New_Leases_Required': 0,
+                            'Units_Liquidated': liquidated_count
+                        })
+                        
+                # Remove permanently liquidated units from the main fleet so they don't age and reappear next year
+                if liquidated_this_year:
+                    fleet = fleet[~fleet['VINs'].isin(liquidated_this_year)]
                         
                 progress_bar.progress((year - start_year + 1) / (max_end_year - start_year + 1))
 
             # --- Presentation & Export ---
             audit_df = pd.DataFrame(audit_records)
-            lease_df = pd.DataFrame(lease_summary) if lease_summary else pd.DataFrame(columns=['Calendar_Year', 'Location', 'Type', 'Target', 'Assigned_From_Pool', 'New_Leases_Required'])
+            lease_df = pd.DataFrame(lease_summary) if lease_summary else pd.DataFrame(columns=['Calendar_Year', 'Location', 'Type', 'Target', 'Assigned_From_Pool', 'New_Leases_Required', 'Units_Liquidated'])
 
             st.divider()
             c1, c2, c3 = st.columns(3)
@@ -157,7 +180,7 @@ if uploaded_file:
                              title="Total Network Deficit (Leases Triggered)")
                 st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("📋 Lease Trigger Log")
+            st.subheader("📋 Lease & Liquidation Log")
             st.dataframe(lease_df.sort_values(['Calendar_Year', 'Location']) if not lease_df.empty else lease_df, use_container_width=True)
 
             st.subheader("🔍 Global Pool Allocation Audit")
@@ -174,7 +197,7 @@ if uploaded_file:
             # Export Excel with Yearly & Type Tabs
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Tab 1: High level summary of all leases
+                # Tab 1: High level summary of all leases and liquidations
                 lease_df.to_excel(writer, sheet_name='Lease Summary', index=False)
                 
                 # Sort logically: Assigned -> Leased -> Spare -> Liquidated
