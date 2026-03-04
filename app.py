@@ -3,10 +3,6 @@ import pandas as pd
 import plotly.express as px
 import io
 
-
-st.set_page_config(page_title="Cascade Optimizer", layout="wide")
-
-st.title("🚌 Bus Cascade & Optimization Engine by Suraj Shah")
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -31,6 +27,11 @@ def check_password():
     return False
 
 @st.cache_data
+
+st.set_page_config(page_title="Cascade Optimizer", layout="wide")
+
+st.title("🚌 Bus Cascade & Optimization Engine by Suraj Shah")
+
 
 #st.markdown("""
 #**Strategy:** Treat all inventory as a **seperate Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
