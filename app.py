@@ -72,7 +72,7 @@ if uploaded_file:
         inv = df_b[['VINs', 'Current Age', 'Type']].copy()
         inv['Type'] = inv['Type'].astype(str).str.upper().str.strip()
         
-        start_year = 2025
+        start_year = 2026
         max_end_year = int(reqs['EndYear'].max())
 
         if st.sidebar.button("Run Pool Optimization"):
