@@ -3,6 +3,9 @@ import pandas as pd
 import plotly.express as px
 import io
 
+# set_page_config must be the very first Streamlit command
+st.set_page_config(page_title="Cascade Optimizer", layout="wide")
+
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -26,9 +29,9 @@ def check_password():
                 st.error("😕 Password incorrect")
     return False
 
-# Removed the floating @st.cache_data decorator here which was causing the SyntaxError
-
-st.set_page_config(page_title="Cascade Optimizer", layout="wide")
+# THIS IS THE MISSING PIECE: Call the function and stop execution if not logged in
+if not check_password():
+    st.stop()
 
 st.title("🚌 Bus Cascade & Optimization Engine by Suraj Shah")
 
