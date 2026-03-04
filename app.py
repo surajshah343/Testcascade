@@ -176,7 +176,7 @@ if uploaded_file:
             st.subheader("Lease Requirements by Year")
             if not lease_df.empty:
                 yearly_summary = lease_df.groupby('Calendar_Year')[['New_Leases_Required', 'Units_Liquidated']].sum().reset_index()
-                fig = px.bar(yearly_leases, x='Calendar_Year', y='New_Leases_Required', y='Units_Liquidated', 
+                fig = px.bar(yearly_leases, x='Calendar_Year', y=['New_Leases_Required', 'Units_Liquidated'], 
                              title="Total Network Deficit (Leases Triggered)")
                 st.plotly_chart(fig, use_container_width=True)
 
