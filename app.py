@@ -175,8 +175,10 @@ if uploaded_file:
 
             st.subheader("Lease Requirements by Year")
             if not lease_df.empty:
+                # FIX 1: Used the correct dataframe variable `yearly_summary`
                 yearly_summary = lease_df.groupby('Calendar_Year')[['New_Leases_Required', 'Units_Liquidated']].sum().reset_index()
-                fig = px.bar(yearly_leases, x='Calendar_Year', y=['New_Leases_Required', 'Units_Liquidated'], 
+                # FIX 2: Passed `y` as a list to plot both columns without a syntax error
+                fig = px.bar(yearly_summary, x='Calendar_Year', y=['New_Leases_Required', 'Units_Liquidated'], 
                              title="Total Network Deficit (Leases Triggered)")
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -184,7 +186,7 @@ if uploaded_file:
             #st.subheader("📅 Yearly Summary")
             #if not lease_df.empty:
             #    yearly_summary = lease_df.groupby('Calendar_Year')[['New_Leases_Required', 'Units_Liquidated']].sum().reset_index()
-             #   st.dataframe(yearly_summary, use_container_width=True)
+            #    st.dataframe(yearly_summary, use_container_width=True)
             # ------------------------------------
 
             st.subheader("📋 Lease & Liquidation Log")
