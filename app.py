@@ -7,6 +7,30 @@ import io
 st.set_page_config(page_title="Cascade Optimizer", layout="wide")
 
 st.title("🚌 Bus Cascade & Optimization Engine by Suraj Shah")
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+    if st.session_state["password_correct"]:
+        return True
+
+    st.title("🔒 Access Restricted - Hilco Only")
+    try:
+        correct_pass = st.secrets["password"]
+    except:
+        correct_pass = "admin123" 
+
+    with st.form("password_form"):
+        password_input = st.text_input("Please enter the access password:", type="password")
+        submit_password = st.form_submit_button("Login")
+        if submit_password:
+            if password_input == correct_pass:
+                st.session_state["password_correct"] = True
+                st.rerun()
+            else:
+                st.error("😕 Password incorrect")
+    return False
+
+@st.cache_data
 
 #st.markdown("""
 #**Strategy:** Treat all inventory as a **seperate Pool**. Prioritize the strictest age constraints first and assign the oldest valid vehicles to minimize leases.
